@@ -38,15 +38,18 @@ if my_file and customer_file:
             "未启用的条件请保持“— 不启用 —”。\n"
             "💡 如果你的表格某列（如“设备号”）的一个单元格里包含多个值（例如“1,2,3”），程序会自动拆分并匹配客户表格中的单个值。")
 
-    # 数据清洗函数：去除空格、统一大写、填充空值
+    # 数据清洗函数：去除空格、统一大写、处理空值
     def clean_str(s):
+        if pd.isna(s):
+            return ''
         return str(s).strip().upper()
 
     # 判断是否包含分隔符，并拆分
     def split_if_multi(value):
+        if pd.isna(value):
+            return ['']
         # 常见分隔符：逗号（中英文）、分号（中英文）、顿号、空格、竖线、斜杠
         if re.search(r'[，,;；、\s|/]+', str(value)):
-            # 用正则拆分，去空白
             parts = re.split(r'[，,;；、\s|/]+', str(value))
             parts = [p.strip() for p in parts if p.strip()]
             return parts if parts else [str(value)]
@@ -75,23 +78,27 @@ if my_file and customer_file:
         if not active_conditions:
             st.error("请至少设置一个匹配条件（两个表格的列都要选择）。")
         else:
-            # 构建“我的表格”的匹配键集合
-            # 对于每个条件，获取我的表格中对应列的值，并可能拆分
-            my_series_list = []
-            for my_col, _ in active_conditions:
-                # 对每个单元格应用拆分，并返回列表（可能多个值）
-                series_split = my_df[my_col].apply(split_if_multi)
-                my_series_list.append(series_split)
-
-            # 使用 itertools.product 生成所有组合（笛卡尔积）
-            # 注意：每一行都会产生多个组合，最终集合包含所有可能组合
+            # 构建“我的表格”的匹配键集合（按行处理，支持多值拆分）
+            my_key_cols = [my_col for my_col, _ in active_conditions]
             my_key_set = set()
-            for combo in itertools.product(*my_series_list):
-                my_key_set.add(tuple(clean_str(x) for x in combo))
+
+            # 遍历我的表格的每一行
+            for _, row in my_df[my_key_cols].iterrows():
+                # 对当前行的每个单元格进行拆分并清洗，得到列表
+                split_lists = []
+                for val in row:
+                    vals = split_if_multi(val)          # 拆分多值
+                    clean_vals = [clean_str(v) for v in vals]  # 清洗每个拆分值
+                    split_lists.append(clean_vals)
+                # 当前行的笛卡尔积（如果所有单元格都是单值，则只有一个组合）
+                for combo in itertools.product(*split_lists):
+                    my_key_set.add(tuple(combo))
 
             # 构建客户表格的匹配键（不拆分，只清洗）
             cust_key_cols = [cust_col for _, cust_col in active_conditions]
-            cust_keys = customer_df[cust_key_cols].apply(lambda row: tuple(clean_str(x) for x in row), axis=1)
+            cust_keys = customer_df[cust_key_cols].apply(
+                lambda row: tuple(clean_str(x) for x in row), axis=1
+            )
 
             # 匹配
             mask = cust_keys.isin(my_key_set)
