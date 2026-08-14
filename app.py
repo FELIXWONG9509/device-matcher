@@ -5,8 +5,8 @@ import itertools
 import re
 from rapidfuzz import fuzz
 
-st.set_page_config(page_title="设备表格核对工具（多条件+地址结构保护）", layout="wide")
-st.title("🔍 设备表格核对工具（多条件+地址结构保护）")
+st.set_page_config(page_title="设备表格核对工具（多条件+地址保护+详情）", layout="wide")
+st.title("🔍 设备表格核对工具（多条件+地址保护+详情）")
 st.write("上传你的设备表和客户设备表，支持多个匹配条件；地址列自动进行同级别比较，避免跨级误匹配。")
 
 # 上传文件
@@ -36,16 +36,18 @@ if my_file and customer_file:
     st.subheader("设置匹配条件")
     st.info("""
     - **精确匹配**：单元格内容完全一致（忽略大小写和首尾空格）。支持我的表格中一个单元格包含多个值（如“1,2,3”），会自动拆分。
-    - **模糊匹配**：适合普通文本，使用综合相似度算法（WRatio）。**默认启用地址保护**，自动检查省/市/区/街道/路等层级，防止跨级误配。
-    - **模糊+地址保护**：与模糊匹配相同，但会强制进行地址层级检查。
+    - **模糊匹配**：适合普通文本，使用综合相似度算法（WRatio）。
+    - **模糊+地址保护**：在模糊匹配基础上，增加地址层级检查（省、市、区、街道、路等），避免跨级误配。
     - 未启用的条件请保持“— 不启用 —”。
     """)
 
     # 全局阈值与地址保护开关
-    fuzzy_threshold = st.slider("模糊匹配相似度阈值（%）", min_value=50, max_value=100, value=75, step=1,
-                                help="只有相似度超过该值才视为匹配，值越高越严格，越低越宽松。建议70~85之间。")
+    fuzzy_threshold = st.slider("模糊匹配相似度阈值（%）", min_value=40, max_value=100, value=65, step=1,
+                                help="只有相似度超过该值才视为匹配。建议先设65%，根据结果微调。")
     enable_address_protect = st.checkbox("启用地址层级保护（强烈推荐，可减少跨区误匹配）", value=True,
                                          help="自动提取省、市、区、街道、路等关键词，若同层级存在不同值则拒绝匹配。")
+    show_details = st.checkbox("显示匹配详情（相似度、地址保护是否通过）", value=True,
+                               help="在下载结果中增加两列，方便判断阈值是否合适。")
 
     # 数据清洗函数
     def clean_str(s):
@@ -140,12 +142,20 @@ if my_file and customer_file:
                         row_data.append(clean_str(val))
                 my_rows.append(row_data)
 
-            # 逐行匹配客户表格
+            # 存储匹配结果及详情
             matched_indices = []
+            match_details = []  # 每个匹配项对应的相似度和保护状态
+
             for cust_idx, cust_row in customer_df.iterrows():
                 is_match = False
-                for my_row in my_rows:
+                best_min_score = 0
+                best_protect_pass = True
+                matched_my_idx = None
+
+                for my_idx, my_row in enumerate(my_rows):
                     all_pass = True
+                    min_score = 100
+                    protect_pass = True
                     for cond_idx, (my_col, cust_col, mtype) in enumerate(active_conditions):
                         cust_val = clean_str(cust_row[cust_col])
                         if mtype == "精确":
@@ -155,35 +165,54 @@ if my_file and customer_file:
                         else:
                             my_val = my_row[cond_idx]
 
-                            # 地址保护（对模糊和模糊+地址保护均生效）
-                            if enable_address_protect:
+                            # 地址保护
+                            if enable_address_protect and mtype in ["模糊", "模糊+地址保护"]:
                                 if not address_level_check(my_val, cust_val):
                                     all_pass = False
+                                    protect_pass = False
                                     break
 
-                            # 计算相似度
+                            # 相似度
                             if not my_val or not cust_val:
                                 score = 0
                             else:
                                 score = fuzz.WRatio(my_val, cust_val)
 
-                            # 如果匹配方式为“模糊+地址保护”，阈值提高5%作为额外严格
-                            effective_threshold = fuzzy_threshold + (5 if mtype == "模糊+地址保护" else 0)
+                            if score < min_score:
+                                min_score = score
 
+                            effective_threshold = fuzzy_threshold + (5 if mtype == "模糊+地址保护" else 0)
                             if score < effective_threshold:
                                 all_pass = False
                                 break
+
                     if all_pass:
+                        if min_score > best_min_score:
+                            best_min_score = min_score
+                            best_protect_pass = protect_pass
+                            matched_my_idx = my_idx
                         is_match = True
-                        break
+                        break  # 找到一个匹配即可，无需继续
+
                 if is_match:
                     matched_indices.append(cust_idx)
+                    match_details.append({
+                        '客户行号': cust_idx,
+                        '我的表格匹配行号': matched_my_idx,
+                        '最小相似度': round(best_min_score, 1),
+                        '地址保护通过': '是' if best_protect_pass else '否'
+                    })
 
             matched_df = customer_df.loc[matched_indices].copy()
 
             st.success(f"✅ 匹配完成！客户表格中共有 {len(matched_df)} 条记录属于你的设备。")
 
             if len(matched_df) > 0:
+                if show_details:
+                    details_df = pd.DataFrame(match_details)
+                    # 合并详情到结果
+                    matched_df = pd.concat([matched_df.reset_index(drop=True), details_df.reset_index(drop=True)], axis=1)
+
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
                     matched_df.to_excel(writer, index=False, sheet_name='匹配结果')
@@ -196,4 +225,4 @@ if my_file and customer_file:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             else:
-                st.warning("没有找到匹配的设备，请调整匹配条件或阈值后重试。")
+                st.warning("没有找到匹配的设备。请尝试降低相似度阈值，或取消地址层级保护，并检查匹配条件设置。")
