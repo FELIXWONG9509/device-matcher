@@ -5,9 +5,9 @@ import itertools
 import re
 from rapidfuzz import fuzz
 
-st.set_page_config(page_title="设备表格核对工具（多条件+模糊匹配+地址保护）", layout="wide")
-st.title("🔍 设备表格核对工具（多条件+模糊匹配+地址保护）")
-st.write("上传你的设备表和客户设备表，支持多个匹配条件，可选择精确或模糊匹配；模糊匹配时保护地址关键信息，避免跨区误匹配。")
+st.set_page_config(page_title="设备表格核对工具（多条件+地址结构保护）", layout="wide")
+st.title("🔍 设备表格核对工具（多条件+地址结构保护）")
+st.write("上传你的设备表和客户设备表，支持多个匹配条件；地址列可选择“模糊+地址保护”，确保同级别比较，避免跨级误匹配。")
 
 # 上传文件
 col1, col2 = st.columns(2)
@@ -35,17 +35,15 @@ if my_file and customer_file:
 
     st.subheader("设置匹配条件")
     st.info("""
-    - 每个条件可以选择“精确匹配”或“模糊匹配”。
-    - **精确匹配**：要求两个单元格内容完全一致（忽略大小写和首尾空格）。支持我的表格中一个单元格包含多个值（如“1,2,3”），会自动拆分。
-    - **模糊匹配**：适合地址、公司名等书写不规范的列。可调节阈值，并开启“地址关键信息保护”防止跨区误匹配。
+    - **精确匹配**：单元格内容完全一致（忽略大小写和首尾空格）。支持我的表格中一个单元格包含多个值（如“1,2,3”），会自动拆分。
+    - **模糊匹配**：适合普通文本，使用综合相似度算法（WRatio）。
+    - **模糊+地址保护**：适合地址列，在模糊匹配前先检查省、市、区、街道、路等层级是否一致或兼容，防止跨级误配。
     - 未启用的条件请保持“— 不启用 —”。
     """)
 
-    # 模糊匹配阈值滑块
+    # 模糊匹配阈值滑块（仅用于模糊匹配和模糊+地址保护）
     fuzzy_threshold = st.slider("模糊匹配相似度阈值（%）", min_value=50, max_value=100, value=70, step=1,
                                 help="只有相似度超过该值才视为匹配，值越高越严格，越低越宽松。建议65~85之间。")
-    protect_address = st.checkbox("启用地址关键信息保护（推荐）", value=True,
-                                  help="自动提取区/县/市等关键词，若不同则直接判定不匹配；若相同则自动降低阈值10个百分点。")
 
     # 数据清洗函数
     def clean_str(s):
@@ -64,15 +62,46 @@ if my_file and customer_file:
         else:
             return [str(value)]
 
-    # 提取地址关键信息（区/县/市）
-    def extract_address_keys(text):
-        if not isinstance(text, str):
-            text = str(text)
-        # 匹配类似 “越秀区”、“天河区”、“番禺区”、“广州市” 等
-        pattern = r'([\u4e00-\u9fa5]{1,4}(?:区|县|市))'
-        matches = re.findall(pattern, text)
-        keys = set(matches)
-        return keys
+    # ---------- 地址结构保护相关函数 ----------
+    def extract_level_keys(text):
+        """提取地址中的省、市、区、街道、路等层级的关键词主体"""
+        text = str(text)
+        patterns = {
+            'province': r'([\u4e00-\u9fa5]{2,8}(?:省|自治区|特别行政区))',
+            'city': r'([\u4e00-\u9fa5]{2,8}(?:市|自治州|地区|盟))',
+            'district': r'([\u4e00-\u9fa5]{2,8}(?:区|县|旗|新区))',
+            'street': r'([\u4e00-\u9fa5]{2,8}(?:街道|镇|乡))',
+            'road': r'([\u4e00-\u9fa5]{2,12}(?:路|街|大道|巷|道))'
+        }
+        suffixes = ['特别行政区', '自治区', '自治州', '地区', '盟', '新区', '省', '市', '区', '县', '旗', '街道', '镇', '乡', '路', '街', '大道', '巷', '道']
+        levels = {}
+        for level, pattern in patterns.items():
+            matches = re.findall(pattern, text)
+            cleaned = []
+            for m in matches:
+                # 去掉后缀，保留主体
+                for suf in suffixes:
+                    if m.endswith(suf):
+                        cleaned.append(m[:-len(suf)])
+                        break
+                else:
+                    cleaned.append(m)
+            levels[level] = cleaned
+        return levels
+
+    def address_level_check(addr1, addr2):
+        """检查两个地址的层级是否冲突：同层级若都存在则必须有交集"""
+        levels1 = extract_level_keys(addr1)
+        levels2 = extract_level_keys(addr2)
+        for level in ['province', 'city', 'district', 'street', 'road']:
+            list1 = set(levels1.get(level, []))
+            list2 = set(levels2.get(level, []))
+            if list1 and list2:
+                # 同层级两边都有，但无交集则冲突
+                if not list1 & list2:
+                    return False
+        return True
+    # ----------------------------------------
 
     # 准备列选项
     none_option = "— 不启用 —"
@@ -82,13 +111,13 @@ if my_file and customer_file:
     # 创建4组条件，每组增加匹配方式选择
     conditions = []
     for i in range(4):
-        col_a, col_b, col_c = st.columns([1, 1, 0.8])
+        col_a, col_b, col_c = st.columns([1, 1, 0.9])
         with col_a:
             my_col = st.selectbox(f"条件{i+1}：我的表格列", my_cols, key=f"my_col_{i}")
         with col_b:
             cust_col = st.selectbox(f"条件{i+1}：客户表格列", cust_cols, key=f"cust_col_{i}")
         with col_c:
-            match_type = st.selectbox(f"匹配方式", ["精确", "模糊"], key=f"match_type_{i}")
+            match_type = st.selectbox(f"匹配方式", ["精确", "模糊", "模糊+地址保护"], key=f"match_type_{i}")
         conditions.append((my_col, cust_col, match_type))
 
     # 检查是否至少启用了一个条件
@@ -105,11 +134,9 @@ if my_file and customer_file:
                 for my_col, _, mtype in active_conditions:
                     val = row[my_col]
                     if mtype == "精确":
-                        # 拆分多值，清洗后作为列表
                         vals = [clean_str(x) for x in split_if_multi(val)]
                         row_data.append(vals)
                     else:
-                        # 模糊匹配：只保留清洗后的字符串，不拆分
                         row_data.append(clean_str(val))
                 my_rows.append(row_data)
 
@@ -122,36 +149,22 @@ if my_file and customer_file:
                     for cond_idx, (my_col, cust_col, mtype) in enumerate(active_conditions):
                         cust_val = clean_str(cust_row[cust_col])
                         if mtype == "精确":
-                            # 客户单元格值必须在我的行拆分列表中
                             if cust_val not in my_row[cond_idx]:
                                 all_pass = False
                                 break
                         else:
-                            # 模糊匹配
                             my_val = my_row[cond_idx]
-                            # 地址关键信息保护
-                            if protect_address:
-                                my_keys = extract_address_keys(my_val)
-                                cust_keys = extract_address_keys(cust_val)
-                                # 如果双方都提取到了关键信息，且无交集，直接不匹配
-                                if my_keys and cust_keys and my_keys.isdisjoint(cust_keys):
+                            # 模糊+地址保护：先检查地址结构
+                            if mtype == "模糊+地址保护":
+                                if not address_level_check(my_val, cust_val):
                                     all_pass = False
                                     break
-                                # 如果有交集，降低阈值
-                                if my_keys and cust_keys and not my_keys.isdisjoint(cust_keys):
-                                    effective_threshold = fuzzy_threshold - 10
-                                else:
-                                    effective_threshold = fuzzy_threshold
-                            else:
-                                effective_threshold = fuzzy_threshold
-
-                            # 计算相似度（使用 WRatio 更适合中文）
+                            # 计算相似度（WRatio）
                             if not my_val or not cust_val:
                                 score = 0
                             else:
                                 score = fuzz.WRatio(my_val, cust_val)
-
-                            if score < effective_threshold:
+                            if score < fuzzy_threshold:
                                 all_pass = False
                                 break
                     if all_pass:
