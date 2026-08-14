@@ -17,7 +17,6 @@ with col2:
     customer_file = st.file_uploader("📤 上传客户的设备表（Excel或CSV）", type=["xlsx", "xls", "csv"], key="customer")
 
 if my_file and customer_file:
-    # 读取文件函数
     def load_file(file):
         if file.name.endswith('.csv'):
             return pd.read_csv(file)
@@ -41,7 +40,6 @@ if my_file and customer_file:
     - 未启用的条件请保持“— 不启用 —”。
     """)
 
-    # 全局阈值与地址保护开关
     fuzzy_threshold = st.slider("模糊匹配相似度阈值（%）", min_value=40, max_value=100, value=60, step=1,
                                 help="只有相似度超过该值才视为匹配。建议先设60%，根据结果微调。")
     enable_address_protect = st.checkbox("启用地址层级保护（推荐，可减少跨区误匹配）", value=True,
@@ -51,22 +49,18 @@ if my_file and customer_file:
     show_details = st.checkbox("显示匹配详情（相似度、地址保护是否通过）", value=True,
                                help="在下载结果中增加两列，方便判断阈值是否合适。")
 
-    # 数据清洗函数
     def clean_str(s):
         if pd.isna(s):
             return ''
         return str(s).strip().upper()
 
-    # 忽略括号内容
     def remove_brackets(s):
         if pd.isna(s):
             return ''
         s = str(s)
-        # 删除中文括号和英文括号及其内容
         s = re.sub(r'[（(【\[].*?[)）\]】]', '', s)
         return s.strip()
 
-    # 拆分多值函数（用于精确匹配）
     def split_if_multi(value):
         if pd.isna(value):
             return ['']
@@ -77,11 +71,8 @@ if my_file and customer_file:
         else:
             return [str(value)]
 
-    # ---------- 地址层级提取与比较 ----------
     def extract_level_keys(text):
-        """提取地址中的省、市、区、街道、路等层级的主体关键词"""
         text = str(text)
-        # 先移除括号内容，防止干扰
         text = remove_brackets(text)
         patterns = {
             'province': r'([\u4e00-\u9fa5]{2,8}(?:省|自治区|特别行政区))',
@@ -106,7 +97,6 @@ if my_file and customer_file:
         return levels
 
     def address_level_check(addr1, addr2):
-        """检查两个地址的层级是否冲突：同层级若都存在则必须有交集"""
         levels1 = extract_level_keys(addr1)
         levels2 = extract_level_keys(addr2)
         for level in ['province', 'city', 'district', 'street', 'road']:
@@ -116,14 +106,11 @@ if my_file and customer_file:
                 if not list1 & list2:
                     return False
         return True
-    # ----------------------------------------
 
-    # 准备列选项
     none_option = "— 不启用 —"
     my_cols = [none_option] + list(my_df.columns)
     cust_cols = [none_option] + list(customer_df.columns)
 
-    # 创建4组条件
     conditions = []
     for i in range(4):
         col_a, col_b, col_c = st.columns([1, 1, 0.9])
@@ -135,14 +122,12 @@ if my_file and customer_file:
             match_type = st.selectbox(f"匹配方式", ["精确", "模糊", "模糊+地址保护"], key=f"match_type_{i}")
         conditions.append((my_col, cust_col, match_type))
 
-    # 检查是否至少启用了一个条件
     active_conditions = [(my, cust, mtype) for my, cust, mtype in conditions if my != none_option and cust != none_option]
 
     if st.button("🚀 开始匹配"):
         if not active_conditions:
             st.error("请至少设置一个匹配条件（两个表格的列都要选择）。")
         else:
-            # 预处理我的表格数据
             my_rows = []
             for _, row in my_df.iterrows():
                 row_data = []
@@ -152,13 +137,11 @@ if my_file and customer_file:
                         vals = [clean_str(x) for x in split_if_multi(val)]
                         row_data.append(vals)
                     else:
-                        # 对模糊匹配，先移除括号再清洗
                         if ignore_brackets:
                             val = remove_brackets(val)
                         row_data.append(clean_str(val))
                 my_rows.append(row_data)
 
-            # 存储匹配结果及详情
             matched_indices = []
             match_details = []
 
@@ -181,20 +164,23 @@ if my_file and customer_file:
                         else:
                             my_val = my_row[cond_idx]
 
-                            # 地址保护（仅针对模糊和模糊+地址保护）
-                            if enable_address_protect:
+                            if enable_address_protect and mtype in ["模糊", "模糊+地址保护"]:
                                 if not address_level_check(my_val, cust_val):
                                     all_pass = False
                                     protect_pass = False
                                     break
 
-                            # 对客户值也进行括号移除
                             if ignore_brackets:
                                 cust_val = remove_brackets(cust_val)
 
-                            # 计算多种相似度，取最大值
-                            if not my_val or not cust_val:
-                                score = 0
+                            # **完全相等直接通过**
+                            if ignore_brackets:
+                                my_val_cmp = remove_brackets(my_val)
+                            else:
+                                my_val_cmp = my_val
+
+                            if my_val_cmp and cust_val and my_val_cmp == cust_val:
+                                score = 100
                             else:
                                 scores = [
                                     fuzz.WRatio(my_val, cust_val),
@@ -217,7 +203,7 @@ if my_file and customer_file:
                             best_protect_pass = protect_pass
                             matched_my_idx = my_idx
                         is_match = True
-                        break  # 找到一个匹配即可
+                        break
 
                 if is_match:
                     matched_indices.append(cust_idx)
