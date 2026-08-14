@@ -5,9 +5,9 @@ import itertools
 import re
 from rapidfuzz import fuzz
 
-st.set_page_config(page_title="设备表格核对工具（多条件+地址保护+详情）", layout="wide")
-st.title("🔍 设备表格核对工具（多条件+地址保护+详情）")
-st.write("上传你的设备表和客户设备表，支持多个匹配条件；地址列自动进行同级别比较，避免跨级误匹配。")
+st.set_page_config(page_title="设备表格核对工具（多条件+地址保护+括号忽略）", layout="wide")
+st.title("🔍 设备表格核对工具（多条件+地址保护+括号忽略）")
+st.write("上传你的设备表和客户设备表，支持多个匹配条件；地址列自动进行同级别比较，并忽略括号备注。")
 
 # 上传文件
 col1, col2 = st.columns(2)
@@ -36,16 +36,18 @@ if my_file and customer_file:
     st.subheader("设置匹配条件")
     st.info("""
     - **精确匹配**：单元格内容完全一致（忽略大小写和首尾空格）。支持我的表格中一个单元格包含多个值（如“1,2,3”），会自动拆分。
-    - **模糊匹配**：适合普通文本，使用综合相似度算法（WRatio）。
+    - **模糊匹配**：适合普通文本，使用多种相似度算法取最大值，并自动忽略括号内容。
     - **模糊+地址保护**：在模糊匹配基础上，增加地址层级检查（省、市、区、街道、路等），避免跨级误配。
     - 未启用的条件请保持“— 不启用 —”。
     """)
 
     # 全局阈值与地址保护开关
-    fuzzy_threshold = st.slider("模糊匹配相似度阈值（%）", min_value=40, max_value=100, value=65, step=1,
-                                help="只有相似度超过该值才视为匹配。建议先设65%，根据结果微调。")
-    enable_address_protect = st.checkbox("启用地址层级保护（强烈推荐，可减少跨区误匹配）", value=True,
+    fuzzy_threshold = st.slider("模糊匹配相似度阈值（%）", min_value=40, max_value=100, value=60, step=1,
+                                help="只有相似度超过该值才视为匹配。建议先设60%，根据结果微调。")
+    enable_address_protect = st.checkbox("启用地址层级保护（推荐，可减少跨区误匹配）", value=True,
                                          help="自动提取省、市、区、街道、路等关键词，若同层级存在不同值则拒绝匹配。")
+    ignore_brackets = st.checkbox("忽略括号内容（推荐，可忽略“（备注）”等）", value=True,
+                                  help="计算相似度前自动删除中英文括号及其中的内容。")
     show_details = st.checkbox("显示匹配详情（相似度、地址保护是否通过）", value=True,
                                help="在下载结果中增加两列，方便判断阈值是否合适。")
 
@@ -54,6 +56,15 @@ if my_file and customer_file:
         if pd.isna(s):
             return ''
         return str(s).strip().upper()
+
+    # 忽略括号内容
+    def remove_brackets(s):
+        if pd.isna(s):
+            return ''
+        s = str(s)
+        # 删除中文括号和英文括号及其内容
+        s = re.sub(r'[（(【\[].*?[)）\]】]', '', s)
+        return s.strip()
 
     # 拆分多值函数（用于精确匹配）
     def split_if_multi(value):
@@ -70,6 +81,8 @@ if my_file and customer_file:
     def extract_level_keys(text):
         """提取地址中的省、市、区、街道、路等层级的主体关键词"""
         text = str(text)
+        # 先移除括号内容，防止干扰
+        text = remove_brackets(text)
         patterns = {
             'province': r'([\u4e00-\u9fa5]{2,8}(?:省|自治区|特别行政区))',
             'city': r'([\u4e00-\u9fa5]{2,8}(?:市|自治州|地区|盟))',
@@ -139,12 +152,15 @@ if my_file and customer_file:
                         vals = [clean_str(x) for x in split_if_multi(val)]
                         row_data.append(vals)
                     else:
+                        # 对模糊匹配，先移除括号再清洗
+                        if ignore_brackets:
+                            val = remove_brackets(val)
                         row_data.append(clean_str(val))
                 my_rows.append(row_data)
 
             # 存储匹配结果及详情
             matched_indices = []
-            match_details = []  # 每个匹配项对应的相似度和保护状态
+            match_details = []
 
             for cust_idx, cust_row in customer_df.iterrows():
                 is_match = False
@@ -165,18 +181,27 @@ if my_file and customer_file:
                         else:
                             my_val = my_row[cond_idx]
 
-                            # 地址保护
-                            if enable_address_protect and mtype in ["模糊", "模糊+地址保护"]:
+                            # 地址保护（仅针对模糊和模糊+地址保护）
+                            if enable_address_protect:
                                 if not address_level_check(my_val, cust_val):
                                     all_pass = False
                                     protect_pass = False
                                     break
 
-                            # 相似度
+                            # 对客户值也进行括号移除
+                            if ignore_brackets:
+                                cust_val = remove_brackets(cust_val)
+
+                            # 计算多种相似度，取最大值
                             if not my_val or not cust_val:
                                 score = 0
                             else:
-                                score = fuzz.WRatio(my_val, cust_val)
+                                scores = [
+                                    fuzz.WRatio(my_val, cust_val),
+                                    fuzz.partial_ratio(my_val, cust_val),
+                                    fuzz.token_set_ratio(my_val, cust_val)
+                                ]
+                                score = max(scores)
 
                             if score < min_score:
                                 min_score = score
@@ -192,7 +217,7 @@ if my_file and customer_file:
                             best_protect_pass = protect_pass
                             matched_my_idx = my_idx
                         is_match = True
-                        break  # 找到一个匹配即可，无需继续
+                        break  # 找到一个匹配即可
 
                 if is_match:
                     matched_indices.append(cust_idx)
@@ -210,7 +235,6 @@ if my_file and customer_file:
             if len(matched_df) > 0:
                 if show_details:
                     details_df = pd.DataFrame(match_details)
-                    # 合并详情到结果
                     matched_df = pd.concat([matched_df.reset_index(drop=True), details_df.reset_index(drop=True)], axis=1)
 
                 output = io.BytesIO()
