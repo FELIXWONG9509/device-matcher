@@ -5,8 +5,8 @@ import itertools
 import re
 from rapidfuzz import fuzz
 
-st.set_page_config(page_title="设备表格核对工具（多条件+地址保护+自动忽略括号）", layout="wide")
-st.title("🔍 设备表格核对工具（多条件+地址保护+自动忽略括号）")
+st.set_page_config(page_title="设备表格核对工具（多条件+地址保护+自动忽略括号+导出清理）", layout="wide")
+st.title("🔍 设备表格核对工具（多条件+地址保护+自动忽略括号+导出清理）")
 st.write("上传你的设备表和客户设备表，支持多个匹配条件；地址列自动进行同级别比较，并自动忽略括号内容。")
 
 # 上传文件
@@ -35,7 +35,7 @@ if my_file and customer_file:
     st.subheader("设置匹配条件")
     st.info("""
     - **精确匹配**：单元格内容完全一致（忽略大小写和首尾空格）。支持我的表格中一个单元格包含多个值（如“1,2,3”），会自动拆分。
-    - **模糊匹配**：适合普通文本，使用多种相似度算法取最大值。**自动忽略括号及其中的内容**（例如“（华为超充技术支持）”）。
+    - **模糊匹配**：适合普通文本，使用多种相似度算法取最大值。**自动忽略括号及其中的内容**。
     - **模糊+地址保护**：在模糊匹配基础上，增加地址层级检查（省、市、区、街道、路等），避免跨级误配。
     - 未启用的条件请保持“— 不启用 —”。
     """)
@@ -58,7 +58,7 @@ if my_file and customer_file:
         return s.upper()
 
     def remove_brackets(s):
-        """删除中英文括号及其中的内容（强制自动执行）"""
+        """删除中英文括号及其中的内容"""
         if pd.isna(s):
             return ''
         s = str(s)
@@ -112,6 +112,20 @@ if my_file and customer_file:
                 if not list1 & list2:
                     return False
         return True
+
+    def sanitize_excel_strings(df):
+        """清理 DataFrame 中所有字符串，移除控制字符（保留普通可见字符）"""
+        def clean_cell(x):
+            if isinstance(x, str):
+                # 移除非法 XML 字符（0x00-0x08, 0x0B, 0x0C, 0x0E-0x1F）
+                x = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', x)
+                # 可选：替换其他不可见字符为空格
+                x = x.replace('\u200b', '')  # 零宽空格
+                return x
+            return x
+
+        df_cleaned = df.applymap(clean_cell)
+        return df_cleaned
 
     # ========== 单对地址测试（诊断工具） ==========
     with st.expander("🔧 单对地址测试（诊断隐藏字符或相似度）"):
@@ -247,6 +261,9 @@ if my_file and customer_file:
                     })
 
             matched_df = customer_df.loc[matched_indices].copy()
+
+            # 导出前清理非法字符
+            matched_df = sanitize_excel_strings(matched_df)
 
             st.success(f"✅ 匹配完成！客户表格中共有 {len(matched_df)} 条记录属于你的设备。")
 
