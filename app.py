@@ -7,7 +7,7 @@ from rapidfuzz import fuzz
 
 st.set_page_config(page_title="设备表格核对工具（多条件+地址结构保护）", layout="wide")
 st.title("🔍 设备表格核对工具（多条件+地址结构保护）")
-st.write("上传你的设备表和客户设备表，支持多个匹配条件；地址列可选择“模糊+地址保护”，确保同级别比较，避免跨级误匹配。")
+st.write("上传你的设备表和客户设备表，支持多个匹配条件；地址列自动进行同级别比较，避免跨级误匹配。")
 
 # 上传文件
 col1, col2 = st.columns(2)
@@ -36,14 +36,16 @@ if my_file and customer_file:
     st.subheader("设置匹配条件")
     st.info("""
     - **精确匹配**：单元格内容完全一致（忽略大小写和首尾空格）。支持我的表格中一个单元格包含多个值（如“1,2,3”），会自动拆分。
-    - **模糊匹配**：适合普通文本，使用综合相似度算法（WRatio）。
-    - **模糊+地址保护**：适合地址列，在模糊匹配前先检查省、市、区、街道、路等层级是否一致或兼容，防止跨级误配。
+    - **模糊匹配**：适合普通文本，使用综合相似度算法（WRatio）。**默认启用地址保护**，自动检查省/市/区/街道/路等层级，防止跨级误配。
+    - **模糊+地址保护**：与模糊匹配相同，但会强制进行地址层级检查。
     - 未启用的条件请保持“— 不启用 —”。
     """)
 
-    # 模糊匹配阈值滑块（仅用于模糊匹配和模糊+地址保护）
-    fuzzy_threshold = st.slider("模糊匹配相似度阈值（%）", min_value=50, max_value=100, value=70, step=1,
-                                help="只有相似度超过该值才视为匹配，值越高越严格，越低越宽松。建议65~85之间。")
+    # 全局阈值与地址保护开关
+    fuzzy_threshold = st.slider("模糊匹配相似度阈值（%）", min_value=50, max_value=100, value=75, step=1,
+                                help="只有相似度超过该值才视为匹配，值越高越严格，越低越宽松。建议70~85之间。")
+    enable_address_protect = st.checkbox("启用地址层级保护（强烈推荐，可减少跨区误匹配）", value=True,
+                                         help="自动提取省、市、区、街道、路等关键词，若同层级存在不同值则拒绝匹配。")
 
     # 数据清洗函数
     def clean_str(s):
@@ -62,9 +64,9 @@ if my_file and customer_file:
         else:
             return [str(value)]
 
-    # ---------- 地址结构保护相关函数 ----------
+    # ---------- 地址层级提取与比较 ----------
     def extract_level_keys(text):
-        """提取地址中的省、市、区、街道、路等层级的关键词主体"""
+        """提取地址中的省、市、区、街道、路等层级的主体关键词"""
         text = str(text)
         patterns = {
             'province': r'([\u4e00-\u9fa5]{2,8}(?:省|自治区|特别行政区))',
@@ -79,7 +81,6 @@ if my_file and customer_file:
             matches = re.findall(pattern, text)
             cleaned = []
             for m in matches:
-                # 去掉后缀，保留主体
                 for suf in suffixes:
                     if m.endswith(suf):
                         cleaned.append(m[:-len(suf)])
@@ -97,7 +98,6 @@ if my_file and customer_file:
             list1 = set(levels1.get(level, []))
             list2 = set(levels2.get(level, []))
             if list1 and list2:
-                # 同层级两边都有，但无交集则冲突
                 if not list1 & list2:
                     return False
         return True
@@ -108,7 +108,7 @@ if my_file and customer_file:
     my_cols = [none_option] + list(my_df.columns)
     cust_cols = [none_option] + list(customer_df.columns)
 
-    # 创建4组条件，每组增加匹配方式选择
+    # 创建4组条件
     conditions = []
     for i in range(4):
         col_a, col_b, col_c = st.columns([1, 1, 0.9])
@@ -154,17 +154,23 @@ if my_file and customer_file:
                                 break
                         else:
                             my_val = my_row[cond_idx]
-                            # 模糊+地址保护：先检查地址结构
-                            if mtype == "模糊+地址保护":
+
+                            # 地址保护（对模糊和模糊+地址保护均生效）
+                            if enable_address_protect:
                                 if not address_level_check(my_val, cust_val):
                                     all_pass = False
                                     break
-                            # 计算相似度（WRatio）
+
+                            # 计算相似度
                             if not my_val or not cust_val:
                                 score = 0
                             else:
                                 score = fuzz.WRatio(my_val, cust_val)
-                            if score < fuzzy_threshold:
+
+                            # 如果匹配方式为“模糊+地址保护”，阈值提高5%作为额外严格
+                            effective_threshold = fuzzy_threshold + (5 if mtype == "模糊+地址保护" else 0)
+
+                            if score < effective_threshold:
                                 all_pass = False
                                 break
                     if all_pass:
