@@ -5,8 +5,8 @@ import itertools
 import re
 from rapidfuzz import fuzz
 
-st.set_page_config(page_title="设备表格核对工具（多条件+地址保护+括号忽略）", layout="wide")
-st.title("🔍 设备表格核对工具（多条件+地址保护+括号忽略）")
+st.set_page_config(page_title="设备表格核对工具（多条件+地址保护+括号忽略+隐藏字符清洗）", layout="wide")
+st.title("🔍 设备表格核对工具（多条件+地址保护+括号忽略+隐藏字符清洗）")
 st.write("上传你的设备表和客户设备表，支持多个匹配条件；地址列自动进行同级别比较，并忽略括号备注。")
 
 # 上传文件
@@ -49,12 +49,20 @@ if my_file and customer_file:
     show_details = st.checkbox("显示匹配详情（相似度、地址保护是否通过）", value=True,
                                help="在下载结果中增加两列，方便判断阈值是否合适。")
 
+    # ========== 工具函数 ==========
     def clean_str(s):
+        """清洗字符串：转大写，移除所有空白字符（包括全角空格、制表符、换行等）"""
         if pd.isna(s):
             return ''
-        return str(s).strip().upper()
+        s = str(s).strip()
+        # 移除所有空白字符（包括普通空格、制表符、换行、全角空格等）
+        s = re.sub(r'\s+', '', s)
+        # 移除全角空格（\u3000）
+        s = s.replace('\u3000', '')
+        return s.upper()
 
     def remove_brackets(s):
+        """删除中英文括号及其中的内容"""
         if pd.isna(s):
             return ''
         s = str(s)
@@ -62,6 +70,7 @@ if my_file and customer_file:
         return s.strip()
 
     def split_if_multi(value):
+        """拆分多值单元格（用于精确匹配）"""
         if pd.isna(value):
             return ['']
         if re.search(r'[，,;；、\s|/]+', str(value)):
@@ -72,8 +81,8 @@ if my_file and customer_file:
             return [str(value)]
 
     def extract_level_keys(text):
-        text = str(text)
-        text = remove_brackets(text)
+        """提取地址中的省、市、区、街道、路等层级的主体关键词"""
+        text = clean_str(remove_brackets(text))  # 先清洗，再提取
         patterns = {
             'province': r'([\u4e00-\u9fa5]{2,8}(?:省|自治区|特别行政区))',
             'city': r'([\u4e00-\u9fa5]{2,8}(?:市|自治州|地区|盟))',
@@ -97,6 +106,7 @@ if my_file and customer_file:
         return levels
 
     def address_level_check(addr1, addr2):
+        """检查两个地址的层级是否冲突：同层级若都存在则必须有交集"""
         levels1 = extract_level_keys(addr1)
         levels2 = extract_level_keys(addr2)
         for level in ['province', 'city', 'district', 'street', 'road']:
@@ -107,6 +117,36 @@ if my_file and customer_file:
                     return False
         return True
 
+    # ========== 单对地址测试（诊断工具） ==========
+    with st.expander("🔧 单对地址测试（诊断隐藏字符或相似度）"):
+        test_addr1 = st.text_input("地址A（我的表格中的地址）")
+        test_addr2 = st.text_input("地址B（客户表格中的地址）")
+        if st.button("测试这对地址"):
+            if test_addr1 and test_addr2:
+                cleaned1 = clean_str(remove_brackets(test_addr1))
+                cleaned2 = clean_str(remove_brackets(test_addr2))
+                st.write(f"清洗后地址A：`{cleaned1}`")
+                st.write(f"清洗后地址B：`{cleaned2}`")
+                # 完全相等判断
+                if cleaned1 == cleaned2:
+                    st.success("✅ 完全相等，应能匹配（即使阈值100也能通过）")
+                # 相似度
+                scores = [
+                    fuzz.WRatio(cleaned1, cleaned2),
+                    fuzz.partial_ratio(cleaned1, cleaned2),
+                    fuzz.token_set_ratio(cleaned1, cleaned2)
+                ]
+                max_score = max(scores)
+                st.write(f"相似度：{max_score:.1f}%")
+                # 地址保护
+                protect = address_level_check(cleaned1, cleaned2)
+                st.write(f"地址层级保护通过：{'是' if protect else '否'}")
+                if not protect:
+                    st.warning("地址层级保护未通过，可能是某个层级冲突")
+            else:
+                st.warning("请填写两个地址")
+
+    # ========== 匹配条件设置 ==========
     none_option = "— 不启用 —"
     my_cols = [none_option] + list(my_df.columns)
     cust_cols = [none_option] + list(customer_df.columns)
@@ -128,6 +168,7 @@ if my_file and customer_file:
         if not active_conditions:
             st.error("请至少设置一个匹配条件（两个表格的列都要选择）。")
         else:
+            # 预处理我的表格数据
             my_rows = []
             for _, row in my_df.iterrows():
                 row_data = []
@@ -164,22 +205,22 @@ if my_file and customer_file:
                         else:
                             my_val = my_row[cond_idx]
 
+                            # 地址保护
                             if enable_address_protect and mtype in ["模糊", "模糊+地址保护"]:
                                 if not address_level_check(my_val, cust_val):
                                     all_pass = False
                                     protect_pass = False
                                     break
 
+                            # 忽略括号
                             if ignore_brackets:
                                 cust_val = remove_brackets(cust_val)
+                            # 进一步清洗（虽然前面已经清洗过，但为了统一）
+                            my_val = clean_str(my_val)
+                            cust_val = clean_str(cust_val)
 
                             # **完全相等直接通过**
-                            if ignore_brackets:
-                                my_val_cmp = remove_brackets(my_val)
-                            else:
-                                my_val_cmp = my_val
-
-                            if my_val_cmp and cust_val and my_val_cmp == cust_val:
+                            if my_val and cust_val and my_val == cust_val:
                                 score = 100
                             else:
                                 scores = [
