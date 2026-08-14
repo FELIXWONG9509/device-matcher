@@ -42,10 +42,10 @@ if my_file and customer_file:
     """)
 
     # 模糊匹配阈值滑块
-    fuzzy_threshold = st.slider("模糊匹配相似度阈值（%）", min_value=50, max_value=100, value=75, step=1,
-                                help="只有相似度超过该值才视为匹配，值越高越严格，越低越宽松。建议70~85之间。")
+    fuzzy_threshold = st.slider("模糊匹配相似度阈值（%）", min_value=50, max_value=100, value=70, step=1,
+                                help="只有相似度超过该值才视为匹配，值越高越严格，越低越宽松。建议65~85之间。")
     protect_address = st.checkbox("启用地址关键信息保护（推荐）", value=True,
-                                  help="自动提取区/县/市等关键词，若不同则直接判定不匹配。")
+                                  help="自动提取区/县/市等关键词，若不同则直接判定不匹配；若相同则自动降低阈值10个百分点。")
 
     # 数据清洗函数
     def clean_str(s):
@@ -69,10 +69,8 @@ if my_file and customer_file:
         if not isinstance(text, str):
             text = str(text)
         # 匹配类似 “越秀区”、“天河区”、“番禺区”、“广州市” 等
-        # 模式：1-4个汉字后跟着 区/县/市
         pattern = r'([\u4e00-\u9fa5]{1,4}(?:区|县|市))'
         matches = re.findall(pattern, text)
-        # 去重并过滤太短的（如“市区”可能被误提取，但一般不会）
         keys = set(matches)
         return keys
 
@@ -129,21 +127,31 @@ if my_file and customer_file:
                                 all_pass = False
                                 break
                         else:
-                            # 模糊匹配：先进行地址关键信息保护（仅当启用）
-                            my_val = my_row[cond_idx]  # 单值字符串
+                            # 模糊匹配
+                            my_val = my_row[cond_idx]
+                            # 地址关键信息保护
                             if protect_address:
                                 my_keys = extract_address_keys(my_val)
                                 cust_keys = extract_address_keys(cust_val)
-                                # 如果双方都提取到了关键信息，且没有交集，则直接不匹配
+                                # 如果双方都提取到了关键信息，且无交集，直接不匹配
                                 if my_keys and cust_keys and my_keys.isdisjoint(cust_keys):
                                     all_pass = False
                                     break
-                            # 相似度计算
+                                # 如果有交集，降低阈值
+                                if my_keys and cust_keys and not my_keys.isdisjoint(cust_keys):
+                                    effective_threshold = fuzzy_threshold - 10
+                                else:
+                                    effective_threshold = fuzzy_threshold
+                            else:
+                                effective_threshold = fuzzy_threshold
+
+                            # 计算相似度（使用 WRatio 更适合中文）
                             if not my_val or not cust_val:
                                 score = 0
                             else:
-                                score = fuzz.token_set_ratio(my_val, cust_val)
-                            if score < fuzzy_threshold:
+                                score = fuzz.WRatio(my_val, cust_val)
+
+                            if score < effective_threshold:
                                 all_pass = False
                                 break
                     if all_pass:
